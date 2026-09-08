@@ -49,3 +49,5 @@ It will open automatically in your browser at `http://localhost:8501`.
   sensors are wired to the Jetson Orin Nano.
 - Add authentication / multi-rover support if you want a fleet view.
 - Swap the synthetic heatmap for actual FLIR Boson thermal camera frames.
+
+- ![Dashboard Screenshot](dashboard_screenshot.png)
