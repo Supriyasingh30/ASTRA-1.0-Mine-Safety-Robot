@@ -73,5 +73,4 @@ It will open automatically in your browser at `http://localhost:8501`.
   hardware exists — the dashboard already calls this exact function shape.
 - Swap the synthetic heatmap for actual FLIR Boson thermal camera frames.
 - Add multi-rover / fleet support if scaling the demo beyond a single unit.
-
-- ![Dashboard Screenshot](dashboard_screenshot.png)
+-

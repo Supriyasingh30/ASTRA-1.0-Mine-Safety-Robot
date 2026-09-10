@@ -22,6 +22,10 @@ GAS_CHANNELS = {
     "PM":   {"baseline": 10,   "threshold": 150,  "unit": "µg/m³"},
 }
 
+# Mock RFID/BLE registry — in the final system this maps to the mine's
+# actual shift-log database of miner tags checked in that day.
+MINER_DATABASE = ["#2401", "#2407", "#2413", "#2417", "#2419"]
+
 
 class ASTRASimulator:
     """Holds simulated rover + sensor state across dashboard refreshes."""
@@ -39,6 +43,7 @@ class ASTRASimulator:
         self.flood_ticks_left = 0
         self.victim_found_override = None  # None, or forced high-confidence event
         self.victim_ticks_left = 0
+        self.comm_log = []  # two-way audio comms transcript with trapped miner
         self.battery_pct = 92.0
         self._log("System initialized — ASTRA 1.0 online")
 
@@ -199,6 +204,31 @@ class ASTRASimulator:
             return "#2417" if self.victim_found_override else f"#{2400 + (self.t % 20)}"
         return None
 
+    def get_miner_registry(self):
+        """Per-miner detection scores — each tag gets its own confidence
+        curve (phase-shifted) so the registry feels like independent,
+        real detections rather than one shared number."""
+        registry = []
+        for i, miner_id in enumerate(MINER_DATABASE):
+            phase = i * 2.1
+            base = 30 + 25 * abs(np.sin((self.t + phase * 10) / 9))
+            noise = random.uniform(-4, 4)
+            score = round(min(99, max(0, base + noise)), 1)
+
+            # The manually-triggered "Victim Found" scenario boosts one tag
+            if self.victim_found_override and miner_id == "#2417":
+                score = round(min(99, 90 + random.uniform(-3, 5)), 1)
+
+            if score >= 70:
+                status = "FOUND"
+            elif score >= 40:
+                status = "WEAK SIGNAL"
+            else:
+                status = "NOT DETECTED"
+
+            registry.append({"id": miner_id, "score": score, "status": status})
+        return registry
+
     # ---------------- Comms ----------------
     def toggle_comms(self):
         self.comms_mode = "fallback" if self.comms_mode == "primary" else "primary"
@@ -210,6 +240,27 @@ class ASTRASimulator:
             return random.randint(70, 95)
         return random.randint(30, 55)
 
+    # ---------------- Autonomous fail-safe (IMU dead-reckoning return) ----------------
+    def get_failsafe_status(self, comms_signal, gas_status, flood_status):
+        """Simulates the rover's autonomous fail-safe logic: if comms drops
+        too low OR conditions turn critical, the onboard AI would trigger
+        an autonomous dead-reckoning return using the BNO055 IMU."""
+        if comms_signal < 35 or gas_status == "CRITICAL" or flood_status == "CRITICAL":
+            return "ACTIVE — AUTO-RETURN ENGAGED"
+        return "STANDBY — MANUAL/AI PATH CONTROL"
+
+    # ---------------- Multi-modal detection layers ----------------
+    def get_detection_layers(self):
+        """Status of each sensing modality feeding the victim-scan fusion.
+        All layers stay active in this simulation; on real hardware each
+        would reflect actual sensor health."""
+        return {
+            "Vision (YOLOv8n)": True,
+            "Thermal (FLIR Boson)": True,
+            "mmWave Radar (IWR6843)": True,
+            "RFID/BLE": True,
+        }
+
     # ---------------- Event log ----------------
     def _log(self, message):
         timestamp = time.strftime("%H:%M:%S")
@@ -219,3 +270,73 @@ class ASTRASimulator:
 
     def log_event(self, message):
         self._log(message)
+
+    # ---------------- Two-way audio communication with trapped miner ----------------
+    # comm_log can grow without bound over a long demo/mission (especially
+    # once real audio clips are involved, which are much bigger than text).
+    # Cap it so memory use — and therefore UI responsiveness — stays flat
+    # no matter how long the session runs.
+    MAX_COMM_LOG = 100
+
+    def _append_comm_log(self, entry):
+        self.comm_log.append(entry)
+        if len(self.comm_log) > self.MAX_COMM_LOG:
+            self.comm_log.pop(0)
+
+    def send_message_to_miner(self, text=None, audio_bytes=None):
+        """Rescue team -> miner, via the rover's 4-mic beamforming + DSP
+        audio array (only possible once the rover is within acoustic
+        range, i.e. a miner has been located). Accepts either a typed
+        note or a real recorded voice clip."""
+        timestamp = time.strftime("%H:%M:%S")
+        entry = {"from": "Rescue Team", "time": timestamp}
+        if audio_bytes is not None:
+            entry["type"] = "audio"
+            entry["audio"] = audio_bytes
+        else:
+            entry["type"] = "text"
+            entry["text"] = text
+        self._append_comm_log(entry)
+        self._log("Voice message sent to trapped miner via rover audio link")
+
+    def receive_message_from_miner(self, audio_bytes=None, text=None):
+        """Miner -> rescue team, real audio captured from the rover's
+        onboard mic array once within acoustic range (~20 m in quiet
+        conditions; expect roughly 3-8 m of reliably intelligible range
+        inside a noisy tunnel unless amplification/noise suppression is
+        added on top of the beamforming array).
+
+        HARDWARE HOOK: on the real rover, call this whenever the onboard
+        mic array / DSP pipeline has a finished utterance ready (e.g. a
+        callback from your audio-streaming client over WiFi-mesh/LoRa).
+        Until that hardware exists, the dashboard calls this same
+        function from its own "record as miner" input as a stand-in —
+        so during a live demo, a teammate role-playing the trapped miner
+        can record a real clip and it appears here exactly the way a
+        genuine rover capture would.
+        """
+        timestamp = time.strftime("%H:%M:%S")
+        entry = {"from": "Miner", "time": timestamp}
+        if audio_bytes is not None:
+            entry["type"] = "audio"
+            entry["audio"] = audio_bytes
+        else:
+            entry["type"] = "text"
+            entry["text"] = text
+        self._append_comm_log(entry)
+        self._log("Incoming audio from trapped miner — transcript logged")
+
+    def simulate_miner_reply(self):
+        """Canned-text acknowledgement — a one-click stand-in for quick
+        rehearsal. For an actual demo of the two-way audio link, prefer
+        receive_message_from_miner() with a real recorded clip instead."""
+        timestamp = time.strftime("%H:%M:%S")
+        replies = [
+            "We can hear you. Two of us are here, conscious.",
+            "Air feels okay for now. No visible flooding here.",
+            "One person injured, leg — needs help fast.",
+            "Understood, we'll stay near the marked position.",
+        ]
+        text = random.choice(replies)
+        self._append_comm_log({"from": "Miner", "type": "text", "text": text, "time": timestamp})
+        self._log("Incoming audio from trapped miner — transcript logged (simulated)")
